@@ -1823,7 +1823,8 @@ fn resolve_model_alias_with_config(model: &str) -> String {
 /// or bare model names when `OPENAI_BASE_URL` is set (for local providers
 /// like Ollama, LM Studio, vLLM where model names don't follow provider/model
 /// format — e.g. "qwen2.5-coder:7b", "llama3:8b").
-/// Rejects: empty, whitespace-only, strings with spaces, or invalid chars.
+/// Rejects: empty or whitespace-only strings, strings containing spaces,
+/// and malformed provider/model structure when provider/model syntax is required.
 fn validate_model_syntax(model: &str) -> Result<(), String> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
