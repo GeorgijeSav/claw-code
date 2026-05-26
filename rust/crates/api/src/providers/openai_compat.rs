@@ -991,8 +991,10 @@ fn wire_model_for_base_url<'a>(
         //   the full slug so the gateway receives the model ID it expects
         //   (e.g. `openai/gpt-4.1-mini` for OpenRouter).
         let is_default_url =
-            normalize_base_url(base_url) == normalize_base_url(config.default_base_url);
-        let is_local_url = matches!(url_host(base_url), "localhost" | "127.0.0.1" | "::1");
+            normalize_base_url(base_url).eq_ignore_ascii_case(normalize_base_url(config.default_base_url));
+        let host = url_host(base_url);
+        let is_local_url =
+            host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1");
         if is_default_url || is_local_url {
             return Cow::Borrowed(&model[pos + 1..]);
         }
@@ -2847,6 +2849,18 @@ mod tests {
                 "https://api.openai.com/v1/chat/completions"
             ),
             Cow::Borrowed("gpt-4o")
+        );
+
+        // Regression: host matching is case-insensitive for default OpenAI URL
+        assert_eq!(
+            super::wire_model_for_base_url("openai/gpt-4o", config, "https://API.OPENAI.COM/v1"),
+            Cow::Borrowed("gpt-4o")
+        );
+
+        // Regression: host matching is case-insensitive for known-local URLs
+        assert_eq!(
+            super::wire_model_for_base_url("openai/llama3.2", config, "http://LOCALHOST:11434/v1"),
+            Cow::Borrowed("llama3.2")
         );
     }
 }
