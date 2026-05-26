@@ -934,8 +934,8 @@ fn strip_routing_prefix(model: &str) -> &str {
 
 fn wire_model_for_base_url<'a>(
     model: &'a str,
-    _config: OpenAiCompatConfig,
-    _base_url: &str,
+    config: OpenAiCompatConfig,
+    base_url: &str,
 ) -> Cow<'a, str> {
     let Some(pos) = model.find('/') else {
         return Cow::Borrowed(model);
@@ -944,12 +944,23 @@ fn wire_model_for_base_url<'a>(
     let lowered_prefix = prefix.to_ascii_lowercase();
 
     if lowered_prefix == "openai" {
-        // The `openai/` prefix is a claw-code routing hint to select the
-        // OpenAI-compatible provider. It should always be stripped before
-        // sending the model name on the wire — both for the default OpenAI
-        // endpoint and for custom endpoints (Ollama, LM Studio, vLLM, etc.)
-        // where the upstream API only knows the bare model name.
-        return Cow::Borrowed(&model[pos + 1..]);
+        // The `openai/` prefix is a claw-code routing hint. Whether to strip it
+        // depends on the target endpoint:
+        //
+        // - Default OpenAI endpoint: strip (it is only a routing prefix here).
+        // - Known-local endpoints (localhost / 127.0.0.1 / [::1], e.g. Ollama,
+        //   LM Studio): strip because local servers use bare model names.
+        // - Custom non-local endpoints (OpenRouter, other gateways): preserve
+        //   the full slug so the gateway receives the model ID it expects
+        //   (e.g. `openai/gpt-4.1-mini` for OpenRouter).
+        let is_default_url = base_url == config.default_base_url;
+        let is_local_url = base_url.contains("localhost")
+            || base_url.contains("127.0.0.1")
+            || base_url.contains("[::1]");
+        if is_default_url || is_local_url {
+            return Cow::Borrowed(&model[pos + 1..]);
+        }
+        return Cow::Borrowed(model);
     }
 
     if matches!(lowered_prefix.as_str(), "xai" | "grok" | "qwen" | "kimi") {
@@ -2725,21 +2736,29 @@ mod tests {
     #[test]
     fn wire_model_strips_openai_prefix_for_custom_base_url() {
         // Issue #3123: Ollama models with openai/ prefix should have prefix
-        // stripped when sent on the wire to any endpoint (including custom ones).
+        // stripped for the default OpenAI endpoint and for known-local endpoints,
+        // but preserved for custom non-local gateways (e.g. OpenRouter).
         use std::borrow::Cow;
         let ollama_url = "http://localhost:11434/v1";
+        let openrouter_url = "https://openrouter.ai/api/v1";
         let config = super::OpenAiCompatConfig::openai();
 
-        // openai/ prefix stripped for custom base URL (Ollama)
+        // openai/ prefix stripped for known-local URL (Ollama)
         assert_eq!(
             super::wire_model_for_base_url("openai/qwen2.5-coder:7b", config, ollama_url),
             Cow::Borrowed("qwen2.5-coder:7b")
         );
 
-        // openai/ prefix stripped for default OpenAI URL too
+        // openai/ prefix stripped for default OpenAI URL
         assert_eq!(
             super::wire_model_for_base_url("openai/gpt-4o", config, super::DEFAULT_OPENAI_BASE_URL),
             Cow::Borrowed("gpt-4o")
+        );
+
+        // openai/ prefix preserved for custom non-local gateway (OpenRouter)
+        assert_eq!(
+            super::wire_model_for_base_url("openai/gpt-4.1-mini", config, openrouter_url),
+            Cow::Borrowed("openai/gpt-4.1-mini")
         );
 
         // Bare model names (no slash) pass through unchanged
