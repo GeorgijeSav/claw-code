@@ -219,7 +219,7 @@ async fn custom_openai_gateway_preserves_non_routing_slash_model_ids() {
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
     let body = concat!(
         "{",
-        "\"id\":\"chatcmpl_non_routing_slug\",",
+        "\"id\":\"chatcmpl_non_routing_slash\",",
         "\"model\":\"my-org/my-fine-tuned-model\",",
         "\"choices\":[{",
         "\"message\":{\"role\":\"assistant\",\"content\":\"Custom model reply\",\"tool_calls\":[]},",
