@@ -932,6 +932,29 @@ fn strip_routing_prefix(model: &str) -> &str {
     }
 }
 
+/// Extract the host (without port) from a URL string.
+/// Returns an empty string if the URL cannot be parsed.
+fn url_host(url: &str) -> &str {
+    // Strip scheme ("https://", "http://", etc.)
+    let rest = match url.split_once("://") {
+        Some((_, r)) => r,
+        None => return "",
+    };
+    // Isolate the authority (before the first '/', '?', or '#')
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.starts_with('[') {
+        // IPv6 literal: host is between '[' and ']'
+        authority
+            .split(']')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('[')
+    } else {
+        // IPv4 or hostname: strip optional port
+        authority.split(':').next().unwrap_or("")
+    }
+}
+
 fn wire_model_for_base_url<'a>(
     model: &'a str,
     config: OpenAiCompatConfig,
@@ -948,15 +971,13 @@ fn wire_model_for_base_url<'a>(
         // depends on the target endpoint:
         //
         // - Default OpenAI endpoint: strip (it is only a routing prefix here).
-        // - Known-local endpoints (localhost / 127.0.0.1 / [::1], e.g. Ollama,
+        // - Known-local endpoints (localhost / 127.0.0.1 / ::1, e.g. Ollama,
         //   LM Studio): strip because local servers use bare model names.
         // - Custom non-local endpoints (OpenRouter, other gateways): preserve
         //   the full slug so the gateway receives the model ID it expects
         //   (e.g. `openai/gpt-4.1-mini` for OpenRouter).
         let is_default_url = base_url == config.default_base_url;
-        let is_local_url = base_url.contains("localhost")
-            || base_url.contains("127.0.0.1")
-            || base_url.contains("[::1]");
+        let is_local_url = matches!(url_host(base_url), "localhost" | "127.0.0.1" | "::1");
         if is_default_url || is_local_url {
             return Cow::Borrowed(&model[pos + 1..]);
         }
@@ -2749,6 +2770,22 @@ mod tests {
             Cow::Borrowed("qwen2.5-coder:7b")
         );
 
+        // openai/ prefix stripped for 127.0.0.1
+        assert_eq!(
+            super::wire_model_for_base_url(
+                "openai/llama3.2",
+                config,
+                "http://127.0.0.1:11434/v1"
+            ),
+            Cow::Borrowed("llama3.2")
+        );
+
+        // openai/ prefix stripped for IPv6 loopback
+        assert_eq!(
+            super::wire_model_for_base_url("openai/llama3.2", config, "http://[::1]:11434/v1"),
+            Cow::Borrowed("llama3.2")
+        );
+
         // openai/ prefix stripped for default OpenAI URL
         assert_eq!(
             super::wire_model_for_base_url("openai/gpt-4o", config, super::DEFAULT_OPENAI_BASE_URL),
@@ -2758,6 +2795,17 @@ mod tests {
         // openai/ prefix preserved for custom non-local gateway (OpenRouter)
         assert_eq!(
             super::wire_model_for_base_url("openai/gpt-4.1-mini", config, openrouter_url),
+            Cow::Borrowed("openai/gpt-4.1-mini")
+        );
+
+        // openai/ prefix preserved for a domain that contains "localhost" as a substring
+        // (false-positive guard: must match the host exactly, not via substring)
+        assert_eq!(
+            super::wire_model_for_base_url(
+                "openai/gpt-4.1-mini",
+                config,
+                "https://not-localhost.example.com/v1"
+            ),
             Cow::Borrowed("openai/gpt-4.1-mini")
         );
 
