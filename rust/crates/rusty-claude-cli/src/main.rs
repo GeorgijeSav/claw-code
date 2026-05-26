@@ -1818,11 +1818,37 @@ fn resolve_model_alias_with_config(model: &str) -> String {
     resolve_model_alias(trimmed).to_string()
 }
 
+/// Returns true if the given base URL points to a loopback/local host
+/// (localhost, 127.0.0.1, or ::1).
+fn is_local_base_url(url: &str) -> bool {
+    let rest = match url.split_once("://") {
+        Some((_, r)) => r,
+        None => return false,
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Strip optional userinfo (e.g. "user:pass@")
+    let authority = match authority.rsplit_once('@') {
+        Some((_, host_port)) => host_port,
+        None => authority,
+    };
+    let host = if authority.starts_with('[') {
+        // IPv6 literal
+        authority
+            .split(']')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('[')
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1")
+}
+
 /// Validate model syntax at parse time.
 /// Accepts: known aliases (opus, sonnet, haiku), provider/model pattern,
-/// or bare model names when `OPENAI_BASE_URL` is set (for local providers
-/// like Ollama, LM Studio, vLLM where model names don't follow provider/model
-/// format — e.g. "qwen2.5-coder:7b", "llama3:8b").
+/// or bare model names when `OPENAI_BASE_URL` points to a local endpoint
+/// (for providers like Ollama, LM Studio, vLLM where model names don't follow
+/// provider/model format — e.g. "qwen2.5-coder:7b", "llama3:8b").
 /// Rejects: empty or whitespace-only strings, strings containing spaces,
 /// and malformed provider/model structure when provider/model syntax is required.
 fn validate_model_syntax(model: &str) -> Result<(), String> {
@@ -1840,14 +1866,18 @@ fn validate_model_syntax(model: &str) -> Result<(), String> {
     // Check provider/model format: provider_id/model_id
     let parts: Vec<&str> = trimmed.split('/').collect();
     if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-        // When OPENAI_BASE_URL is set, the user has configured a local
-        // OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, etc.).
-        // These providers use bare model names (e.g. "qwen2.5-coder:7b",
-        // "llama3:8b") that don't follow the provider/model convention.
-        // Allow them through without requiring a prefix, but only for
-        // bare model names with no slash at all.
-        if parts.len() == 1 && std::env::var_os("OPENAI_BASE_URL").is_some() {
-            return Ok(());
+        // When OPENAI_BASE_URL points to a loopback/local endpoint
+        // (Ollama, LM Studio, vLLM, etc.), allow bare model names
+        // (e.g. "qwen2.5-coder:7b", "llama3:8b") that don't follow the
+        // provider/model convention. Only bypass for local hosts to avoid
+        // masking errors for non-local gateways (e.g. OpenRouter) where
+        // a slash-containing slug is typically required.
+        if parts.len() == 1 {
+            if let Ok(base_url) = std::env::var("OPENAI_BASE_URL") {
+                if is_local_base_url(&base_url) {
+                    return Ok(());
+                }
+            }
         }
         // #154: hint if the model looks like it belongs to a different provider
         let mut err_msg = format!(
@@ -16243,5 +16273,23 @@ mod alias_resolution_tests {
         assert!(validate_model_syntax("qwen2.5-coder:7b").is_ok());
         assert!(validate_model_syntax("llama3:8b").is_ok());
         assert!(validate_model_syntax("mistral").is_ok());
+    }
+
+    #[test]
+    fn test_bare_model_name_rejected_for_non_local_openai_base_url() {
+        // Bare model names should be rejected when OPENAI_BASE_URL points to
+        // a non-local gateway (e.g. OpenRouter), since those typically require
+        // a slash-containing slug like `openai/gpt-4.1-mini`.
+        let _guard = env_lock();
+        let _url = ScopedEnvVar::set("OPENAI_BASE_URL", "https://openrouter.ai/api/v1");
+        assert!(validate_model_syntax("mistral").is_err());
+        assert!(validate_model_syntax("qwen2.5-coder:7b").is_err());
+    }
+
+    #[test]
+    fn test_bare_model_name_passes_for_127_0_0_1() {
+        let _guard = env_lock();
+        let _url = ScopedEnvVar::set("OPENAI_BASE_URL", "http://127.0.0.1:11434/v1");
+        assert!(validate_model_syntax("llama3:8b").is_ok());
     }
 }

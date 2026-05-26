@@ -956,6 +956,11 @@ fn url_host(url: &str) -> &str {
     };
     // Isolate the authority (before the first '/', '?', or '#')
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Strip optional userinfo (e.g. "user:pass@" in "user:pass@localhost:11434")
+    let authority = match authority.rsplit_once('@') {
+        Some((_, host_port)) => host_port,
+        None => authority,
+    };
     if authority.starts_with('[') {
         // IPv6 literal: host is between '[' and ']'
         authority
@@ -2861,6 +2866,26 @@ mod tests {
         assert_eq!(
             super::wire_model_for_base_url("openai/llama3.2", config, "http://LOCALHOST:11434/v1"),
             Cow::Borrowed("llama3.2")
+        );
+
+        // Regression: URLs with userinfo should still be recognized as local
+        assert_eq!(
+            super::wire_model_for_base_url(
+                "openai/llama3.2",
+                config,
+                "http://user:pass@localhost:11434/v1"
+            ),
+            Cow::Borrowed("llama3.2")
+        );
+
+        // Regression: URLs with userinfo for non-local gateways should preserve prefix
+        assert_eq!(
+            super::wire_model_for_base_url(
+                "openai/gpt-4.1-mini",
+                config,
+                "https://user:pass@openrouter.ai/api/v1"
+            ),
+            Cow::Borrowed("openai/gpt-4.1-mini")
         );
     }
 }
