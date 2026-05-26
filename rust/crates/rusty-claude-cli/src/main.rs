@@ -16139,7 +16139,39 @@ mod dump_manifests_tests {
 
 #[cfg(test)]
 mod alias_resolution_tests {
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
     use super::{resolve_model_alias_with_config, validate_model_syntax};
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn test_alias_resolution_builtin() {
@@ -16193,10 +16225,10 @@ mod alias_resolution_tests {
         // Issue #3123: Ollama-style bare model names (no provider/ prefix)
         // should pass validation when OPENAI_BASE_URL is set, indicating
         // a local OpenAI-compatible endpoint is configured.
-        std::env::set_var("OPENAI_BASE_URL", "http://localhost:11434/v1");
+        let _guard = env_lock();
+        let _url = ScopedEnvVar::set("OPENAI_BASE_URL", "http://localhost:11434/v1");
         assert!(validate_model_syntax("qwen2.5-coder:7b").is_ok());
         assert!(validate_model_syntax("llama3:8b").is_ok());
         assert!(validate_model_syntax("mistral").is_ok());
-        std::env::remove_var("OPENAI_BASE_URL");
     }
 }
