@@ -206,7 +206,7 @@ async fn custom_openai_gateway_preserves_slash_model_ids_and_extra_body_params()
     let captured = state.lock().await;
     let request = captured.first().expect("captured request");
     let body: serde_json::Value = serde_json::from_str(&request.body).expect("json body");
-    assert_eq!(body["model"], json!("openai/gpt-4.1-mini"));
+    assert_eq!(body["model"], json!("gpt-4.1-mini"));
     assert_eq!(
         body["web_search_options"],
         json!({"search_context_size": "low"})

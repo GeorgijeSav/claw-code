@@ -934,8 +934,8 @@ fn strip_routing_prefix(model: &str) -> &str {
 
 fn wire_model_for_base_url<'a>(
     model: &'a str,
-    config: OpenAiCompatConfig,
-    base_url: &str,
+    _config: OpenAiCompatConfig,
+    _base_url: &str,
 ) -> Cow<'a, str> {
     let Some(pos) = model.find('/') else {
         return Cow::Borrowed(model);
@@ -944,20 +944,11 @@ fn wire_model_for_base_url<'a>(
     let lowered_prefix = prefix.to_ascii_lowercase();
 
     if lowered_prefix == "openai" {
-        let trimmed_base_url = base_url.trim_end_matches('/');
-        let default_openai = DEFAULT_OPENAI_BASE_URL.trim_end_matches('/');
-        if matches!(
-            lowered_prefix.as_str(),
-            "xai" | "grok" | "kimi" | "gemini" | "gemma"
-        ) {
-            return Cow::Borrowed(&model[pos + 1..]);
-        }
-        if config.provider_name == "OpenAI" && trimmed_base_url != default_openai {
-            // Only preserve the full slug if it's NOT a model we want to strip
-            if !model.contains("gemini") && !model.contains("gemma") {
-                return Cow::Borrowed(model);
-            }
-        }
+        // The `openai/` prefix is a claw-code routing hint to select the
+        // OpenAI-compatible provider. It should always be stripped before
+        // sending the model name on the wire — both for the default OpenAI
+        // endpoint and for custom endpoints (Ollama, LM Studio, vLLM, etc.)
+        // where the upstream API only knows the bare model name.
         return Cow::Borrowed(&model[pos + 1..]);
     }
 
@@ -2729,5 +2720,39 @@ mod tests {
         assert_eq!(super::strip_routing_prefix("kimi/kimi-k2.5"), "kimi-k2.5");
         assert_eq!(super::strip_routing_prefix("kimi-k2.5"), "kimi-k2.5"); // no prefix, unchanged
         assert_eq!(super::strip_routing_prefix("kimi/kimi-k1.5"), "kimi-k1.5");
+    }
+
+    #[test]
+    fn wire_model_strips_openai_prefix_for_custom_base_url() {
+        // Issue #3123: Ollama models with openai/ prefix should have prefix
+        // stripped when sent on the wire to any endpoint (including custom ones).
+        use std::borrow::Cow;
+        let ollama_url = "http://localhost:11434/v1";
+        let config = super::OpenAiCompatConfig::openai();
+
+        // openai/ prefix stripped for custom base URL (Ollama)
+        assert_eq!(
+            super::wire_model_for_base_url("openai/qwen2.5-coder:7b", config, ollama_url),
+            Cow::Borrowed("qwen2.5-coder:7b")
+        );
+
+        // openai/ prefix stripped for default OpenAI URL too
+        assert_eq!(
+            super::wire_model_for_base_url("openai/gpt-4o", config, super::DEFAULT_OPENAI_BASE_URL),
+            Cow::Borrowed("gpt-4o")
+        );
+
+        // Bare model names (no slash) pass through unchanged
+        assert_eq!(
+            super::wire_model_for_base_url("qwen2.5-coder:7b", config, ollama_url),
+            Cow::Borrowed("qwen2.5-coder:7b")
+        );
+
+        // xai/ prefix stripped
+        let xai_config = super::OpenAiCompatConfig::xai();
+        assert_eq!(
+            super::wire_model_for_base_url("xai/grok-3", xai_config, super::DEFAULT_XAI_BASE_URL),
+            Cow::Borrowed("grok-3")
+        );
     }
 }

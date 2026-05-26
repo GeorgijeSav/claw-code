@@ -1819,7 +1819,10 @@ fn resolve_model_alias_with_config(model: &str) -> String {
 }
 
 /// Validate model syntax at parse time.
-/// Accepts: known aliases (opus, sonnet, haiku) or provider/model pattern.
+/// Accepts: known aliases (opus, sonnet, haiku), provider/model pattern,
+/// or bare model names when `OPENAI_BASE_URL` is set (for local providers
+/// like Ollama, LM Studio, vLLM where model names don't follow provider/model
+/// format — e.g. "qwen2.5-coder:7b", "llama3:8b").
 /// Rejects: empty, whitespace-only, strings with spaces, or invalid chars.
 fn validate_model_syntax(model: &str) -> Result<(), String> {
     let trimmed = model.trim();
@@ -1836,6 +1839,14 @@ fn validate_model_syntax(model: &str) -> Result<(), String> {
     // Check provider/model format: provider_id/model_id
     let parts: Vec<&str> = trimmed.split('/').collect();
     if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+        // When OPENAI_BASE_URL is set, the user has configured a local
+        // OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, etc.).
+        // These providers use bare model names (e.g. "qwen2.5-coder:7b",
+        // "llama3:8b") that don't follow the provider/model convention.
+        // Allow them through without requiring a prefix.
+        if std::env::var_os("OPENAI_BASE_URL").is_some() {
+            return Ok(());
+        }
         // #154: hint if the model looks like it belongs to a different provider
         let mut err_msg = format!(
             "invalid model syntax: '{}'.\nExpected provider/model (e.g., anthropic/claude-opus-4-7)",
@@ -16174,5 +16185,17 @@ mod alias_resolution_tests {
         let model = "openai/gpt-4o";
         assert_eq!(resolve_model_alias_with_config(model), model);
         assert!(validate_model_syntax(model).is_ok());
+    }
+
+    #[test]
+    fn test_bare_model_name_passes_when_openai_base_url_set() {
+        // Issue #3123: Ollama-style bare model names (no provider/ prefix)
+        // should pass validation when OPENAI_BASE_URL is set, indicating
+        // a local OpenAI-compatible endpoint is configured.
+        std::env::set_var("OPENAI_BASE_URL", "http://localhost:11434/v1");
+        assert!(validate_model_syntax("qwen2.5-coder:7b").is_ok());
+        assert!(validate_model_syntax("llama3:8b").is_ok());
+        assert!(validate_model_syntax("mistral").is_ok());
+        std::env::remove_var("OPENAI_BASE_URL");
     }
 }
