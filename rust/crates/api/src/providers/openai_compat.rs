@@ -932,6 +932,20 @@ fn strip_routing_prefix(model: &str) -> &str {
     }
 }
 
+/// Normalize a base URL for comparison purposes.
+///
+/// Strips any trailing slashes and a trailing `/chat/completions` path
+/// component so that the following variants are all treated as equivalent:
+/// - `https://api.openai.com/v1`
+/// - `https://api.openai.com/v1/`
+/// - `https://api.openai.com/v1/chat/completions`
+fn normalize_base_url(url: &str) -> &str {
+    let url = url.trim_end_matches('/');
+    url.strip_suffix("/chat/completions")
+        .map(|s| s.trim_end_matches('/'))
+        .unwrap_or(url)
+}
+
 /// Extract the host (without port) from a URL string.
 /// Returns an empty string if the URL cannot be parsed.
 fn url_host(url: &str) -> &str {
@@ -976,7 +990,8 @@ fn wire_model_for_base_url<'a>(
         // - Custom non-local endpoints (OpenRouter, other gateways): preserve
         //   the full slug so the gateway receives the model ID it expects
         //   (e.g. `openai/gpt-4.1-mini` for OpenRouter).
-        let is_default_url = base_url == config.default_base_url;
+        let is_default_url =
+            normalize_base_url(base_url) == normalize_base_url(config.default_base_url);
         let is_local_url = matches!(url_host(base_url), "localhost" | "127.0.0.1" | "::1");
         if is_default_url || is_local_url {
             return Cow::Borrowed(&model[pos + 1..]);
@@ -2816,6 +2831,22 @@ mod tests {
         assert_eq!(
             super::wire_model_for_base_url("xai/grok-3", xai_config, super::DEFAULT_XAI_BASE_URL),
             Cow::Borrowed("grok-3")
+        );
+
+        // Regression: trailing slash on the default OpenAI URL must still strip openai/
+        assert_eq!(
+            super::wire_model_for_base_url("openai/gpt-4o", config, "https://api.openai.com/v1/"),
+            Cow::Borrowed("gpt-4o")
+        );
+
+        // Regression: full chat/completions path as base URL must still strip openai/
+        assert_eq!(
+            super::wire_model_for_base_url(
+                "openai/gpt-4o",
+                config,
+                "https://api.openai.com/v1/chat/completions"
+            ),
+            Cow::Borrowed("gpt-4o")
         );
     }
 }
