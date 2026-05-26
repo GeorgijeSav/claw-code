@@ -1843,8 +1843,9 @@ fn validate_model_syntax(model: &str) -> Result<(), String> {
         // OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, etc.).
         // These providers use bare model names (e.g. "qwen2.5-coder:7b",
         // "llama3:8b") that don't follow the provider/model convention.
-        // Allow them through without requiring a prefix.
-        if std::env::var_os("OPENAI_BASE_URL").is_some() {
+        // Allow them through without requiring a prefix, but only for
+        // bare model names with no slash at all.
+        if parts.len() == 1 && std::env::var_os("OPENAI_BASE_URL").is_some() {
             return Ok(());
         }
         // #154: hint if the model looks like it belongs to a different provider
