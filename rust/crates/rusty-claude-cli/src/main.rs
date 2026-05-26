@@ -16163,6 +16163,12 @@ mod alias_resolution_tests {
             std::env::set_var(key, value);
             Self { key, previous }
         }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
     }
 
     impl Drop for ScopedEnvVar {
@@ -16193,6 +16199,9 @@ mod alias_resolution_tests {
 
     #[test]
     fn test_alias_resolution_syntax_validation() {
+        let _guard = env_lock();
+        let _url = ScopedEnvVar::remove("OPENAI_BASE_URL");
+
         // Resolved aliases should pass syntax validation
         let resolved = resolve_model_alias_with_config("opus");
         assert!(validate_model_syntax(&resolved).is_ok());
@@ -16203,6 +16212,9 @@ mod alias_resolution_tests {
 
     #[test]
     fn test_unknown_alias_fails_validation() {
+        let _guard = env_lock();
+        let _url = ScopedEnvVar::remove("OPENAI_BASE_URL");
+
         // Unknown aliases resolve to themselves
         let resolved = resolve_model_alias_with_config("unknown-alias");
         assert_eq!(resolved, "unknown-alias");
