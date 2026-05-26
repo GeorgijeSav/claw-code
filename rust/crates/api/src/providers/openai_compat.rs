@@ -2772,11 +2772,7 @@ mod tests {
 
         // openai/ prefix stripped for 127.0.0.1
         assert_eq!(
-            super::wire_model_for_base_url(
-                "openai/llama3.2",
-                config,
-                "http://127.0.0.1:11434/v1"
-            ),
+            super::wire_model_for_base_url("openai/llama3.2", config, "http://127.0.0.1:11434/v1"),
             Cow::Borrowed("llama3.2")
         );
 
