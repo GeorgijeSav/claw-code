@@ -16257,6 +16257,9 @@ mod alias_resolution_tests {
 
     #[test]
     fn test_direct_provider_model_passes() {
+        let _guard = env_lock();
+        let _url = ScopedEnvVar::remove("OPENAI_BASE_URL");
+
         // Direct provider/model strings should remain unchanged and pass
         let model = "openai/gpt-4o";
         assert_eq!(resolve_model_alias_with_config(model), model);

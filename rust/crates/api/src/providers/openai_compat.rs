@@ -995,8 +995,8 @@ fn wire_model_for_base_url<'a>(
         // - Custom non-local endpoints (OpenRouter, other gateways): preserve
         //   the full slug so the gateway receives the model ID it expects
         //   (e.g. `openai/gpt-4.1-mini` for OpenRouter).
-        let is_default_url =
-            normalize_base_url(base_url).eq_ignore_ascii_case(normalize_base_url(config.default_base_url));
+        let is_default_url = normalize_base_url(base_url)
+            .eq_ignore_ascii_case(normalize_base_url(config.default_base_url));
         let host = url_host(base_url);
         let is_local_url =
             host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1");
