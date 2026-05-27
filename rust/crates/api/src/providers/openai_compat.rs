@@ -932,6 +932,48 @@ fn strip_routing_prefix(model: &str) -> &str {
     }
 }
 
+/// Normalize a base URL for comparison purposes.
+///
+/// Strips any trailing slashes and a trailing `/chat/completions` path
+/// component so that the following variants are all treated as equivalent:
+/// - `https://api.openai.com/v1`
+/// - `https://api.openai.com/v1/`
+/// - `https://api.openai.com/v1/chat/completions`
+fn normalize_base_url(url: &str) -> &str {
+    let url = url.trim_end_matches('/');
+    url.strip_suffix("/chat/completions")
+        .map(|s| s.trim_end_matches('/'))
+        .unwrap_or(url)
+}
+
+/// Extract the host (without port) from a URL string.
+/// Returns an empty string if the URL cannot be parsed.
+fn url_host(url: &str) -> &str {
+    // Strip scheme ("https://", "http://", etc.)
+    let rest = match url.split_once("://") {
+        Some((_, r)) => r,
+        None => return "",
+    };
+    // Isolate the authority (before the first '/', '?', or '#')
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Strip optional userinfo (e.g. "user:pass@" in "user:pass@localhost:11434")
+    let authority = match authority.rsplit_once('@') {
+        Some((_, host_port)) => host_port,
+        None => authority,
+    };
+    if authority.starts_with('[') {
+        // IPv6 literal: host is between '[' and ']'
+        authority
+            .split(']')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('[')
+    } else {
+        // IPv4 or hostname: strip optional port
+        authority.split(':').next().unwrap_or("")
+    }
+}
+
 fn wire_model_for_base_url<'a>(
     model: &'a str,
     config: OpenAiCompatConfig,
@@ -944,21 +986,24 @@ fn wire_model_for_base_url<'a>(
     let lowered_prefix = prefix.to_ascii_lowercase();
 
     if lowered_prefix == "openai" {
-        let trimmed_base_url = base_url.trim_end_matches('/');
-        let default_openai = DEFAULT_OPENAI_BASE_URL.trim_end_matches('/');
-        if matches!(
-            lowered_prefix.as_str(),
-            "xai" | "grok" | "kimi" | "gemini" | "gemma"
-        ) {
+        // The `openai/` prefix is a claw-code routing hint. Whether to strip it
+        // depends on the target endpoint:
+        //
+        // - Default OpenAI endpoint: strip (it is only a routing prefix here).
+        // - Known-local endpoints (localhost / 127.0.0.1 / ::1, e.g. Ollama,
+        //   LM Studio): strip because local servers use bare model names.
+        // - Custom non-local endpoints (OpenRouter, other gateways): preserve
+        //   the full slug so the gateway receives the model ID it expects
+        //   (e.g. `openai/gpt-4.1-mini` for OpenRouter).
+        let is_default_url = normalize_base_url(base_url)
+            .eq_ignore_ascii_case(normalize_base_url(config.default_base_url));
+        let host = url_host(base_url);
+        let is_local_url =
+            host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1");
+        if is_default_url || is_local_url {
             return Cow::Borrowed(&model[pos + 1..]);
         }
-        if config.provider_name == "OpenAI" && trimmed_base_url != default_openai {
-            // Only preserve the full slug if it's NOT a model we want to strip
-            if !model.contains("gemini") && !model.contains("gemma") {
-                return Cow::Borrowed(model);
-            }
-        }
-        return Cow::Borrowed(&model[pos + 1..]);
+        return Cow::Borrowed(model);
     }
 
     if matches!(lowered_prefix.as_str(), "xai" | "grok" | "qwen" | "kimi") {
@@ -2729,5 +2774,118 @@ mod tests {
         assert_eq!(super::strip_routing_prefix("kimi/kimi-k2.5"), "kimi-k2.5");
         assert_eq!(super::strip_routing_prefix("kimi-k2.5"), "kimi-k2.5"); // no prefix, unchanged
         assert_eq!(super::strip_routing_prefix("kimi/kimi-k1.5"), "kimi-k1.5");
+    }
+
+    #[test]
+    fn wire_model_strips_openai_prefix_for_custom_base_url() {
+        // Issue #3123: Ollama models with openai/ prefix should have prefix
+        // stripped for the default OpenAI endpoint and for known-local endpoints,
+        // but preserved for custom non-local gateways (e.g. OpenRouter).
+        use std::borrow::Cow;
+        let ollama_url = "http://localhost:11434/v1";
+        let openrouter_url = "https://openrouter.ai/api/v1";
+        let config = super::OpenAiCompatConfig::openai();
+
+        // openai/ prefix stripped for known-local URL (Ollama)
+        assert_eq!(
+            super::wire_model_for_base_url("openai/qwen2.5-coder:7b", config, ollama_url),
+            Cow::Borrowed("qwen2.5-coder:7b")
+        );
+
+        // openai/ prefix stripped for 127.0.0.1
+        assert_eq!(
+            super::wire_model_for_base_url("openai/llama3.2", config, "http://127.0.0.1:11434/v1"),
+            Cow::Borrowed("llama3.2")
+        );
+
+        // openai/ prefix stripped for IPv6 loopback
+        assert_eq!(
+            super::wire_model_for_base_url("openai/llama3.2", config, "http://[::1]:11434/v1"),
+            Cow::Borrowed("llama3.2")
+        );
+
+        // openai/ prefix stripped for default OpenAI URL
+        assert_eq!(
+            super::wire_model_for_base_url("openai/gpt-4o", config, super::DEFAULT_OPENAI_BASE_URL),
+            Cow::Borrowed("gpt-4o")
+        );
+
+        // openai/ prefix preserved for custom non-local gateway (OpenRouter)
+        assert_eq!(
+            super::wire_model_for_base_url("openai/gpt-4.1-mini", config, openrouter_url),
+            Cow::Borrowed("openai/gpt-4.1-mini")
+        );
+
+        // openai/ prefix preserved for a domain that contains "localhost" as a substring
+        // (false-positive guard: must match the host exactly, not via substring)
+        assert_eq!(
+            super::wire_model_for_base_url(
+                "openai/gpt-4.1-mini",
+                config,
+                "https://not-localhost.example.com/v1"
+            ),
+            Cow::Borrowed("openai/gpt-4.1-mini")
+        );
+
+        // Bare model names (no slash) pass through unchanged
+        assert_eq!(
+            super::wire_model_for_base_url("qwen2.5-coder:7b", config, ollama_url),
+            Cow::Borrowed("qwen2.5-coder:7b")
+        );
+
+        // xai/ prefix stripped
+        let xai_config = super::OpenAiCompatConfig::xai();
+        assert_eq!(
+            super::wire_model_for_base_url("xai/grok-3", xai_config, super::DEFAULT_XAI_BASE_URL),
+            Cow::Borrowed("grok-3")
+        );
+
+        // Regression: trailing slash on the default OpenAI URL must still strip openai/
+        assert_eq!(
+            super::wire_model_for_base_url("openai/gpt-4o", config, "https://api.openai.com/v1/"),
+            Cow::Borrowed("gpt-4o")
+        );
+
+        // Regression: full chat/completions path as base URL must still strip openai/
+        assert_eq!(
+            super::wire_model_for_base_url(
+                "openai/gpt-4o",
+                config,
+                "https://api.openai.com/v1/chat/completions"
+            ),
+            Cow::Borrowed("gpt-4o")
+        );
+
+        // Regression: host matching is case-insensitive for default OpenAI URL
+        assert_eq!(
+            super::wire_model_for_base_url("openai/gpt-4o", config, "https://API.OPENAI.COM/v1"),
+            Cow::Borrowed("gpt-4o")
+        );
+
+        // Regression: host matching is case-insensitive for known-local URLs
+        assert_eq!(
+            super::wire_model_for_base_url("openai/llama3.2", config, "http://LOCALHOST:11434/v1"),
+            Cow::Borrowed("llama3.2")
+        );
+
+        // Regression: URLs with userinfo should still be recognized as local
+        assert_eq!(
+            super::wire_model_for_base_url(
+                "openai/llama3.2",
+                config,
+                "http://user:pass@localhost:11434/v1"
+            ),
+            Cow::Borrowed("llama3.2")
+        );
+
+        // Regression: URLs with userinfo for non-local gateways should preserve prefix
+        assert_eq!(
+            super::wire_model_for_base_url(
+                "openai/gpt-4.1-mini",
+                config,
+                "https://user:pass@openrouter.ai/api/v1"
+            ),
+            Cow::Borrowed("openai/gpt-4.1-mini")
+        );
     }
 }

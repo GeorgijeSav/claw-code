@@ -162,7 +162,7 @@ async fn send_message_preserves_deepseek_reasoning_content_before_text() {
 }
 
 #[tokio::test]
-async fn custom_openai_gateway_preserves_slash_model_ids_and_extra_body_params() {
+async fn custom_openai_gateway_strips_openai_prefix_and_preserves_extra_body_params() {
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
     let body = concat!(
         "{",
@@ -206,12 +206,51 @@ async fn custom_openai_gateway_preserves_slash_model_ids_and_extra_body_params()
     let captured = state.lock().await;
     let request = captured.first().expect("captured request");
     let body: serde_json::Value = serde_json::from_str(&request.body).expect("json body");
-    assert_eq!(body["model"], json!("openai/gpt-4.1-mini"));
+    assert_eq!(body["model"], json!("gpt-4.1-mini"));
     assert_eq!(
         body["web_search_options"],
         json!({"search_context_size": "low"})
     );
     assert_eq!(body["parallel_tool_calls"], json!(false));
+}
+
+#[tokio::test]
+async fn custom_openai_gateway_preserves_non_routing_slash_model_ids() {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let body = concat!(
+        "{",
+        "\"id\":\"chatcmpl_non_routing_slash\",",
+        "\"model\":\"my-org/my-fine-tuned-model\",",
+        "\"choices\":[{",
+        "\"message\":{\"role\":\"assistant\",\"content\":\"Custom model reply\",\"tool_calls\":[]},",
+        "\"finish_reason\":\"stop\"",
+        "}],",
+        "\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":3}",
+        "}"
+    );
+    let server = spawn_server(
+        state.clone(),
+        vec![http_response("200 OK", "application/json", body)],
+    )
+    .await;
+
+    let client = OpenAiCompatClient::new("openai-test-key", OpenAiCompatConfig::openai())
+        .with_base_url(server.base_url());
+    let response = client
+        .send_message(&MessageRequest {
+            model: "my-org/my-fine-tuned-model".to_string(),
+            ..sample_request(false)
+        })
+        .await
+        .expect("gateway request should succeed");
+
+    assert_eq!(response.model, "my-org/my-fine-tuned-model");
+    assert_eq!(response.total_tokens(), 7);
+
+    let captured = state.lock().await;
+    let request = captured.first().expect("captured request");
+    let body: serde_json::Value = serde_json::from_str(&request.body).expect("json body");
+    assert_eq!(body["model"], json!("my-org/my-fine-tuned-model"));
 }
 
 #[tokio::test]

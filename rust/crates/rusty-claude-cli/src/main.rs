@@ -1926,9 +1926,41 @@ fn resolve_model_alias_with_config(model: &str) -> String {
     resolve_model_alias(trimmed).to_string()
 }
 
-/// Validate model syntax at parse time.
-/// Accepts: known aliases (opus, sonnet, haiku) or provider/model pattern.
-/// Rejects: empty, whitespace-only, strings with spaces, or invalid chars.
+/// Returns true if the given base URL points to a loopback/local host
+/// (localhost, 127.0.0.1, or ::1).
+fn is_local_base_url(url: &str) -> bool {
+    let rest = match url.split_once("://") {
+        Some((_, r)) => r,
+        None => return false,
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Strip optional userinfo (e.g. "user:pass@")
+    let authority = match authority.rsplit_once('@') {
+        Some((_, host_port)) => host_port,
+        None => authority,
+    };
+    let host = if authority.starts_with('[') {
+        // IPv6 literal
+        authority
+            .split(']')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('[')
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1")
+}
+
+/// Validate model syntax at parse time. Callers must resolve model aliases
+/// (e.g. "opus" → "anthropic/claude-opus-4-6") before calling this function;
+/// raw aliases are rejected.
+///
+/// Accepts: `provider/model` format (e.g. "anthropic/claude-opus-4-6"),
+/// or bare model names when `OPENAI_BASE_URL` points to a loopback host
+/// (for local providers like Ollama, LM Studio, vLLM — e.g. "qwen2.5-coder:7b").
+/// Rejects: empty or whitespace-only strings, strings containing spaces,
+/// and bare model names when no loopback `OPENAI_BASE_URL` is configured.
 fn validate_model_syntax(model: &str) -> Result<(), String> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
@@ -1944,6 +1976,19 @@ fn validate_model_syntax(model: &str) -> Result<(), String> {
     // Check provider/model format: provider_id/model_id
     let parts: Vec<&str> = trimmed.split('/').collect();
     if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+        // When OPENAI_BASE_URL points to a loopback/local endpoint
+        // (Ollama, LM Studio, vLLM, etc.), allow bare model names
+        // (e.g. "qwen2.5-coder:7b", "llama3:8b") that don't follow the
+        // provider/model convention. Only bypass for local hosts to avoid
+        // masking errors for non-local gateways (e.g. OpenRouter) where
+        // a slash-containing slug is typically required.
+        if parts.len() == 1 {
+            if let Ok(base_url) = std::env::var("OPENAI_BASE_URL") {
+                if is_local_base_url(&base_url) {
+                    return Ok(());
+                }
+            }
+        }
         // #154: hint if the model looks like it belongs to a different provider
         let mut err_msg = format!(
             "invalid model syntax: '{}'.\nExpected provider/model (e.g., anthropic/claude-opus-4-7)",
@@ -11335,6 +11380,15 @@ fn print_help(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::
 }
 
 #[cfg(test)]
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         acp_status_json, build_runtime_plugin_state_with_loader, build_runtime_with_plugin_state,
@@ -11620,11 +11674,8 @@ mod tests {
         );
     }
 
-    fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        super::env_lock()
     }
 
     fn with_current_dir<T>(cwd: &Path, f: impl FnOnce() -> T) -> T {
@@ -16447,7 +16498,37 @@ mod dump_manifests_tests {
 
 #[cfg(test)]
 mod alias_resolution_tests {
-    use super::{resolve_model_alias_with_config, validate_model_syntax};
+    use std::ffi::OsString;
+
+    use super::{env_lock, resolve_model_alias_with_config, validate_model_syntax};
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn test_alias_resolution_builtin() {
@@ -16468,6 +16549,9 @@ mod alias_resolution_tests {
 
     #[test]
     fn test_alias_resolution_syntax_validation() {
+        let _guard = env_lock();
+        let _url = ScopedEnvVar::remove("OPENAI_BASE_URL");
+
         // Resolved aliases should pass syntax validation
         let resolved = resolve_model_alias_with_config("opus");
         assert!(validate_model_syntax(&resolved).is_ok());
@@ -16478,6 +16562,9 @@ mod alias_resolution_tests {
 
     #[test]
     fn test_unknown_alias_fails_validation() {
+        let _guard = env_lock();
+        let _url = ScopedEnvVar::remove("OPENAI_BASE_URL");
+
         // Unknown aliases resolve to themselves
         let resolved = resolve_model_alias_with_config("unknown-alias");
         assert_eq!(resolved, "unknown-alias");
@@ -16490,9 +16577,42 @@ mod alias_resolution_tests {
 
     #[test]
     fn test_direct_provider_model_passes() {
+        let _guard = env_lock();
+        let _url = ScopedEnvVar::remove("OPENAI_BASE_URL");
+
         // Direct provider/model strings should remain unchanged and pass
         let model = "openai/gpt-4o";
         assert_eq!(resolve_model_alias_with_config(model), model);
         assert!(validate_model_syntax(model).is_ok());
+    }
+
+    #[test]
+    fn test_bare_model_name_passes_when_openai_base_url_set() {
+        // Issue #3123: Ollama-style bare model names (no provider/ prefix)
+        // should pass validation when OPENAI_BASE_URL is set, indicating
+        // a local OpenAI-compatible endpoint is configured.
+        let _guard = env_lock();
+        let _url = ScopedEnvVar::set("OPENAI_BASE_URL", "http://localhost:11434/v1");
+        assert!(validate_model_syntax("qwen2.5-coder:7b").is_ok());
+        assert!(validate_model_syntax("llama3:8b").is_ok());
+        assert!(validate_model_syntax("mistral").is_ok());
+    }
+
+    #[test]
+    fn test_bare_model_name_rejected_for_non_local_openai_base_url() {
+        // Bare model names should be rejected when OPENAI_BASE_URL points to
+        // a non-local gateway (e.g. OpenRouter), since those typically require
+        // a slash-containing slug like `openai/gpt-4.1-mini`.
+        let _guard = env_lock();
+        let _url = ScopedEnvVar::set("OPENAI_BASE_URL", "https://openrouter.ai/api/v1");
+        assert!(validate_model_syntax("mistral").is_err());
+        assert!(validate_model_syntax("qwen2.5-coder:7b").is_err());
+    }
+
+    #[test]
+    fn test_bare_model_name_passes_for_127_0_0_1() {
+        let _guard = env_lock();
+        let _url = ScopedEnvVar::set("OPENAI_BASE_URL", "http://127.0.0.1:11434/v1");
+        assert!(validate_model_syntax("llama3:8b").is_ok());
     }
 }
