@@ -16171,16 +16171,8 @@ mod dump_manifests_tests {
 #[cfg(test)]
 mod alias_resolution_tests {
     use std::ffi::OsString;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    use super::{resolve_model_alias_with_config, validate_model_syntax};
-
-    fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+    use super::{env_lock, resolve_model_alias_with_config, validate_model_syntax};
 
     struct ScopedEnvVar {
         key: &'static str,
