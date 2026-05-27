@@ -1844,13 +1844,15 @@ fn is_local_base_url(url: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1")
 }
 
-/// Validate model syntax at parse time.
-/// Accepts: known aliases (opus, sonnet, haiku), provider/model pattern,
-/// or bare model names when `OPENAI_BASE_URL` points to a local endpoint
-/// (for providers like Ollama, LM Studio, vLLM where model names don't follow
-/// provider/model format — e.g. "qwen2.5-coder:7b", "llama3:8b").
+/// Validate model syntax at parse time. Callers must resolve model aliases
+/// (e.g. "opus" → "anthropic/claude-opus-4-6") before calling this function;
+/// raw aliases are rejected.
+///
+/// Accepts: `provider/model` format (e.g. "anthropic/claude-opus-4-6"),
+/// or bare model names when `OPENAI_BASE_URL` points to a loopback host
+/// (for local providers like Ollama, LM Studio, vLLM — e.g. "qwen2.5-coder:7b").
 /// Rejects: empty or whitespace-only strings, strings containing spaces,
-/// and malformed provider/model structure when provider/model syntax is required.
+/// and bare model names when no loopback `OPENAI_BASE_URL` is configured.
 fn validate_model_syntax(model: &str) -> Result<(), String> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
@@ -11407,11 +11409,8 @@ mod tests {
         );
     }
 
-    fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        super::env_lock()
     }
 
     fn with_current_dir<T>(cwd: &Path, f: impl FnOnce() -> T) -> T {
