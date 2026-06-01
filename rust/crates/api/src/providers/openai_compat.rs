@@ -1009,6 +1009,10 @@ fn is_local_ipv4(host: &str) -> bool {
     let Ok(b) = parts[1].parse::<u8>() else {
         return false;
     };
+    // Validate remaining octets to reject inputs like "10.x.y.z"
+    if parts[2].parse::<u8>().is_err() || parts[3].parse::<u8>().is_err() {
+        return false;
+    }
     match a {
         127 => true,                          // 127.0.0.0/8 loopback
         10 => true,                           // 10.0.0.0/8 private
@@ -2972,7 +2976,7 @@ mod tests {
     }
 
     #[test]
-    fn is_local_url_recognises_loopback_and_private_ranges() {
+    fn is_local_url_recognizes_loopback_and_private_ranges() {
         // Loopback
         assert!(super::is_local_url("http://localhost:11434/v1"));
         assert!(super::is_local_url("http://LOCALHOST/v1"));
@@ -2994,5 +2998,8 @@ mod tests {
         assert!(!super::is_local_url("http://172.15.0.1/v1")); // just outside 172.16/12
         assert!(!super::is_local_url("http://172.32.0.1/v1")); // just outside 172.16/12
         assert!(!super::is_local_url("https://not-localhost.example.com/v1"));
+        // Invalid IPv4-like strings must not produce false positives
+        assert!(!super::is_local_url("http://10.x.y.z/v1"));
+        assert!(!super::is_local_url("http://192.168.x.1/v1"));
     }
 }
