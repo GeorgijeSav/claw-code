@@ -1926,41 +1926,16 @@ fn resolve_model_alias_with_config(model: &str) -> String {
     resolve_model_alias(trimmed).to_string()
 }
 
-/// Returns true if the given base URL points to a loopback/local host
-/// (localhost, 127.0.0.1, or ::1).
-fn is_local_base_url(url: &str) -> bool {
-    let rest = match url.split_once("://") {
-        Some((_, r)) => r,
-        None => return false,
-    };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    // Strip optional userinfo (e.g. "user:pass@")
-    let authority = match authority.rsplit_once('@') {
-        Some((_, host_port)) => host_port,
-        None => authority,
-    };
-    let host = if authority.starts_with('[') {
-        // IPv6 literal
-        authority
-            .split(']')
-            .next()
-            .unwrap_or("")
-            .trim_start_matches('[')
-    } else {
-        authority.split(':').next().unwrap_or("")
-    };
-    host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1")
-}
-
-/// Validate model syntax at parse time. Callers must resolve model aliases
+/// Validate model syntax at parse time. Callers should resolve model aliases
 /// (e.g. "opus" → "anthropic/claude-opus-4-6") before calling this function;
-/// raw aliases are rejected.
-///
+/// otherwise an alias may be treated as a bare model id (when OPENAI_BASE_URL is set).
 /// Accepts: `provider/model` format (e.g. "anthropic/claude-opus-4-6"),
-/// or bare model names when `OPENAI_BASE_URL` points to a loopback host
-/// (for local providers like Ollama, LM Studio, vLLM — e.g. "qwen2.5-coder:7b").
+/// or bare model names when `OPENAI_BASE_URL` is set to any non-empty value
+/// (for local and custom OpenAI-compatible providers like Ollama, LM Studio,
+/// vLLM, or any corporate LLM API that does not use the provider/model
+/// convention — e.g. "qwen2.5-coder:7b").
 /// Rejects: empty or whitespace-only strings, strings containing spaces,
-/// and bare model names when no loopback `OPENAI_BASE_URL` is configured.
+/// and bare model names when no `OPENAI_BASE_URL` is configured.
 fn validate_model_syntax(model: &str) -> Result<(), String> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
@@ -1976,15 +1951,14 @@ fn validate_model_syntax(model: &str) -> Result<(), String> {
     // Check provider/model format: provider_id/model_id
     let parts: Vec<&str> = trimmed.split('/').collect();
     if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-        // When OPENAI_BASE_URL points to a loopback/local endpoint
-        // (Ollama, LM Studio, vLLM, etc.), allow bare model names
-        // (e.g. "qwen2.5-coder:7b", "llama3:8b") that don't follow the
-        // provider/model convention. Only bypass for local hosts to avoid
-        // masking errors for non-local gateways (e.g. OpenRouter) where
-        // a slash-containing slug is typically required.
+        // When OPENAI_BASE_URL is set (to any non-empty value), allow bare
+        // model names (e.g. "qwen2.5-coder:7b", "llama3:8b") that don't
+        // follow the provider/model convention.  This covers local providers
+        // (Ollama, LM Studio, vLLM) as well as corporate LLM APIs and any
+        // other custom OpenAI-compatible endpoint that uses bare model IDs.
         if parts.len() == 1 {
             if let Ok(base_url) = std::env::var("OPENAI_BASE_URL") {
-                if is_local_base_url(&base_url) {
+                if !base_url.trim().is_empty() {
                     return Ok(());
                 }
             }
@@ -16589,8 +16563,8 @@ mod alias_resolution_tests {
     #[test]
     fn test_bare_model_name_passes_when_openai_base_url_set() {
         // Issue #3123: Ollama-style bare model names (no provider/ prefix)
-        // should pass validation when OPENAI_BASE_URL is set, indicating
-        // a local OpenAI-compatible endpoint is configured.
+        // should pass validation when OPENAI_BASE_URL is set to any non-empty
+        // value — including local, private-network, and corporate endpoints.
         let _guard = env_lock();
         let _url = ScopedEnvVar::set("OPENAI_BASE_URL", "http://localhost:11434/v1");
         assert!(validate_model_syntax("qwen2.5-coder:7b").is_ok());
@@ -16599,12 +16573,34 @@ mod alias_resolution_tests {
     }
 
     #[test]
-    fn test_bare_model_name_rejected_for_non_local_openai_base_url() {
-        // Bare model names should be rejected when OPENAI_BASE_URL points to
-        // a non-local gateway (e.g. OpenRouter), since those typically require
-        // a slash-containing slug like `openai/gpt-4.1-mini`.
+    fn test_bare_model_name_passes_for_any_custom_openai_base_url() {
+        // Bare model names should be allowed for any custom OPENAI_BASE_URL,
+        // not just loopback addresses. Corporate LLM APIs, private-network
+        // endpoints (e.g. DGX Spark), and scheme-less URLs all qualify.
         let _guard = env_lock();
+
+        // Non-local gateway: bare names now allowed
         let _url = ScopedEnvVar::set("OPENAI_BASE_URL", "https://openrouter.ai/api/v1");
+        assert!(validate_model_syntax("mistral").is_ok());
+        assert!(validate_model_syntax("qwen2.5-coder:7b").is_ok());
+        drop(_url);
+
+        // Private-network inference server
+        let _url = ScopedEnvVar::set("OPENAI_BASE_URL", "http://192.168.1.100:11434/v1");
+        assert!(validate_model_syntax("llama3:8b").is_ok());
+        drop(_url);
+
+        // Scheme-less input
+        let _url = ScopedEnvVar::set("OPENAI_BASE_URL", "localhost:11434/v1");
+        assert!(validate_model_syntax("mistral").is_ok());
+    }
+
+    #[test]
+    fn test_bare_model_name_rejected_when_no_openai_base_url() {
+        // Bare model names should be rejected when no OPENAI_BASE_URL is set,
+        // since the default Anthropic endpoint requires provider/model format.
+        let _guard = env_lock();
+        let _url = ScopedEnvVar::remove("OPENAI_BASE_URL");
         assert!(validate_model_syntax("mistral").is_err());
         assert!(validate_model_syntax("qwen2.5-coder:7b").is_err());
     }
