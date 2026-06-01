@@ -950,7 +950,7 @@ fn normalize_base_url(url: &str) -> &str {
 /// Extract the host (without port) from a URL string.
 /// Supports URLs with or without a scheme (e.g. both `http://localhost:11434/v1`
 /// and `localhost:11434/v1` are handled correctly).
-/// Returns an empty string if the URL cannot be parsed.
+/// Returns an empty string if no authority/host segment can be extracted.
 fn url_host(url: &str) -> &str {
     // Strip scheme ("https://", "http://", etc.) if present; otherwise treat
     // the whole string as authority+path (scheme-less input like "localhost:11434/v1").
