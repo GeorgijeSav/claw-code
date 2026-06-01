@@ -16601,7 +16601,7 @@ mod alias_resolution_tests {
         // Bare model names should be rejected when no OPENAI_BASE_URL is set,
         // since the default Anthropic endpoint requires provider/model format.
         let _guard = env_lock();
-        std::env::remove_var("OPENAI_BASE_URL");
+        let _url = ScopedEnvVar::remove("OPENAI_BASE_URL");
         assert!(validate_model_syntax("mistral").is_err());
         assert!(validate_model_syntax("qwen2.5-coder:7b").is_err());
     }

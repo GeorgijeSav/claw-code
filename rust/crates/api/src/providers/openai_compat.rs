@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
+use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -989,7 +990,7 @@ fn url_host(url: &str) -> &str {
 ///
 /// Accepts scheme-less inputs (e.g. `localhost:11434/v1`).
 pub fn is_local_url(url: &str) -> bool {
-    let host = url_host(url);
+    let host = url_host(url.trim());
     if host.eq_ignore_ascii_case("localhost") || host == "::1" {
         return true;
     }
@@ -999,25 +1000,15 @@ pub fn is_local_url(url: &str) -> bool {
 /// Returns `true` for IPv4 addresses in the loopback (127/8) or RFC 1918
 /// private ranges.
 fn is_local_ipv4(host: &str) -> bool {
-    let parts: Vec<&str> = host.split('.').collect();
-    if parts.len() != 4 {
-        return false;
-    }
-    let Ok(a) = parts[0].parse::<u8>() else {
+    let Ok(addr) = host.parse::<Ipv4Addr>() else {
         return false;
     };
-    let Ok(b) = parts[1].parse::<u8>() else {
-        return false;
-    };
-    // Validate remaining octets to reject inputs like "10.x.y.z"
-    if parts[2].parse::<u8>().is_err() || parts[3].parse::<u8>().is_err() {
-        return false;
-    }
+    let [a, b, ..] = addr.octets();
     match a {
-        127 => true,                          // 127.0.0.0/8 loopback
-        10 => true,                           // 10.0.0.0/8 private
-        172 => (16..=31).contains(&b),        // 172.16.0.0/12 private
-        192 => b == 168,                      // 192.168.0.0/16 private
+        127 => true,                   // 127.0.0.0/8 loopback
+        10 => true,                    // 10.0.0.0/8 private
+        172 => (16..=31).contains(&b), // 172.16.0.0/12 private
+        192 => b == 168,               // 192.168.0.0/16 private
         _ => false,
     }
 }
@@ -2956,21 +2947,13 @@ mod tests {
             Cow::Borrowed("llama3.2")
         );
         assert_eq!(
-            super::wire_model_for_base_url(
-                "openai/llama3.2",
-                config,
-                "http://172.20.0.1:11434/v1"
-            ),
+            super::wire_model_for_base_url("openai/llama3.2", config, "http://172.20.0.1:11434/v1"),
             Cow::Borrowed("llama3.2")
         );
 
         // 127.x.x.x (all loopback, not just 127.0.0.1) should be treated as local.
         assert_eq!(
-            super::wire_model_for_base_url(
-                "openai/llama3.2",
-                config,
-                "http://127.0.0.2:11434/v1"
-            ),
+            super::wire_model_for_base_url("openai/llama3.2", config, "http://127.0.0.2:11434/v1"),
             Cow::Borrowed("llama3.2")
         );
     }
