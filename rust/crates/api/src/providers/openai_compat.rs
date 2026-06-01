@@ -947,12 +947,15 @@ fn normalize_base_url(url: &str) -> &str {
 }
 
 /// Extract the host (without port) from a URL string.
+/// Supports URLs with or without a scheme (e.g. both `http://localhost:11434/v1`
+/// and `localhost:11434/v1` are handled correctly).
 /// Returns an empty string if the URL cannot be parsed.
 fn url_host(url: &str) -> &str {
-    // Strip scheme ("https://", "http://", etc.)
+    // Strip scheme ("https://", "http://", etc.) if present; otherwise treat
+    // the whole string as authority+path (scheme-less input like "localhost:11434/v1").
     let rest = match url.split_once("://") {
         Some((_, r)) => r,
-        None => return "",
+        None => url,
     };
     // Isolate the authority (before the first '/', '?', or '#')
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -974,6 +977,47 @@ fn url_host(url: &str) -> &str {
     }
 }
 
+/// Returns `true` if the given URL points to a loopback or RFC 1918 private
+/// network host.  Recognised as local:
+///
+/// - `localhost` (case-insensitive)
+/// - Any `127.x.x.x` address (loopback range)
+/// - `::1` (IPv6 loopback)
+/// - `10.x.x.x` (RFC 1918 class A private)
+/// - `172.16.x.x` – `172.31.x.x` (RFC 1918 class B private)
+/// - `192.168.x.x` (RFC 1918 class C private)
+///
+/// Accepts scheme-less inputs (e.g. `localhost:11434/v1`).
+pub fn is_local_url(url: &str) -> bool {
+    let host = url_host(url);
+    if host.eq_ignore_ascii_case("localhost") || host == "::1" {
+        return true;
+    }
+    is_local_ipv4(host)
+}
+
+/// Returns `true` for IPv4 addresses in the loopback (127/8) or RFC 1918
+/// private ranges.
+fn is_local_ipv4(host: &str) -> bool {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() != 4 {
+        return false;
+    }
+    let Ok(a) = parts[0].parse::<u8>() else {
+        return false;
+    };
+    let Ok(b) = parts[1].parse::<u8>() else {
+        return false;
+    };
+    match a {
+        127 => true,                          // 127.0.0.0/8 loopback
+        10 => true,                           // 10.0.0.0/8 private
+        172 => (16..=31).contains(&b),        // 172.16.0.0/12 private
+        192 => b == 168,                      // 192.168.0.0/16 private
+        _ => false,
+    }
+}
+
 fn wire_model_for_base_url<'a>(
     model: &'a str,
     config: OpenAiCompatConfig,
@@ -990,17 +1034,15 @@ fn wire_model_for_base_url<'a>(
         // depends on the target endpoint:
         //
         // - Default OpenAI endpoint: strip (it is only a routing prefix here).
-        // - Known-local endpoints (localhost / 127.0.0.1 / ::1, e.g. Ollama,
-        //   LM Studio): strip because local servers use bare model names.
+        // - Local endpoints (loopback or RFC 1918, e.g. Ollama, LM Studio,
+        //   vLLM on a local/private network): strip because these servers
+        //   use bare model names.
         // - Custom non-local endpoints (OpenRouter, other gateways): preserve
         //   the full slug so the gateway receives the model ID it expects
         //   (e.g. `openai/gpt-4.1-mini` for OpenRouter).
         let is_default_url = normalize_base_url(base_url)
             .eq_ignore_ascii_case(normalize_base_url(config.default_base_url));
-        let host = url_host(base_url);
-        let is_local_url =
-            host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1");
-        if is_default_url || is_local_url {
+        if is_default_url || is_local_url(base_url) {
             return Cow::Borrowed(&model[pos + 1..]);
         }
         return Cow::Borrowed(model);
@@ -2777,10 +2819,11 @@ mod tests {
     }
 
     #[test]
-    fn wire_model_strips_openai_prefix_for_custom_base_url() {
+    fn wire_model_strips_for_default_and_local_preserves_for_non_local_gateways() {
         // Issue #3123: Ollama models with openai/ prefix should have prefix
-        // stripped for the default OpenAI endpoint and for known-local endpoints,
-        // but preserved for custom non-local gateways (e.g. OpenRouter).
+        // stripped for the default OpenAI endpoint and for known-local endpoints
+        // (loopback or RFC 1918 private IPs), but preserved for custom non-local
+        // gateways (e.g. OpenRouter).
         use std::borrow::Cow;
         let ollama_url = "http://localhost:11434/v1";
         let openrouter_url = "https://openrouter.ai/api/v1";
@@ -2887,5 +2930,69 @@ mod tests {
             ),
             Cow::Borrowed("openai/gpt-4.1-mini")
         );
+
+        // Scheme-less input (e.g. OPENAI_BASE_URL=localhost:11434/v1) should be
+        // treated as local and strip the openai/ prefix.
+        assert_eq!(
+            super::wire_model_for_base_url("openai/llama3.2", config, "localhost:11434/v1"),
+            Cow::Borrowed("llama3.2")
+        );
+
+        // RFC 1918 private addresses should be treated as local and strip the prefix.
+        assert_eq!(
+            super::wire_model_for_base_url(
+                "openai/llama3.2",
+                config,
+                "http://192.168.1.100:11434/v1"
+            ),
+            Cow::Borrowed("llama3.2")
+        );
+        assert_eq!(
+            super::wire_model_for_base_url("openai/llama3.2", config, "http://10.0.0.5:11434/v1"),
+            Cow::Borrowed("llama3.2")
+        );
+        assert_eq!(
+            super::wire_model_for_base_url(
+                "openai/llama3.2",
+                config,
+                "http://172.20.0.1:11434/v1"
+            ),
+            Cow::Borrowed("llama3.2")
+        );
+
+        // 127.x.x.x (all loopback, not just 127.0.0.1) should be treated as local.
+        assert_eq!(
+            super::wire_model_for_base_url(
+                "openai/llama3.2",
+                config,
+                "http://127.0.0.2:11434/v1"
+            ),
+            Cow::Borrowed("llama3.2")
+        );
+    }
+
+    #[test]
+    fn is_local_url_recognises_loopback_and_private_ranges() {
+        // Loopback
+        assert!(super::is_local_url("http://localhost:11434/v1"));
+        assert!(super::is_local_url("http://LOCALHOST/v1"));
+        assert!(super::is_local_url("http://127.0.0.1:11434/v1"));
+        assert!(super::is_local_url("http://127.0.0.2/v1"));
+        assert!(super::is_local_url("http://[::1]:11434/v1"));
+        // Scheme-less
+        assert!(super::is_local_url("localhost:11434/v1"));
+        assert!(super::is_local_url("127.0.0.1:11434/v1"));
+        // RFC 1918 private ranges
+        assert!(super::is_local_url("http://10.0.0.5/v1"));
+        assert!(super::is_local_url("http://10.255.255.255/v1"));
+        assert!(super::is_local_url("http://172.16.0.1/v1"));
+        assert!(super::is_local_url("http://172.31.0.1/v1"));
+        assert!(super::is_local_url("http://192.168.1.100/v1"));
+        // Non-local should return false
+        assert!(!super::is_local_url("https://openrouter.ai/api/v1"));
+        assert!(!super::is_local_url("https://api.openai.com/v1"));
+        assert!(!super::is_local_url("http://172.15.0.1/v1")); // just outside 172.16/12
+        assert!(!super::is_local_url("http://172.32.0.1/v1")); // just outside 172.16/12
+        assert!(!super::is_local_url("https://not-localhost.example.com/v1"));
     }
 }
