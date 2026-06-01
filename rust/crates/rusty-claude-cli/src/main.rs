@@ -1926,10 +1926,9 @@ fn resolve_model_alias_with_config(model: &str) -> String {
     resolve_model_alias(trimmed).to_string()
 }
 
-/// Validate model syntax at parse time. Callers must resolve model aliases
+/// Validate model syntax at parse time. Callers should resolve model aliases
 /// (e.g. "opus" → "anthropic/claude-opus-4-6") before calling this function;
-/// raw aliases are rejected.
-///
+/// otherwise an alias may be treated as a bare model id (when OPENAI_BASE_URL is set).
 /// Accepts: `provider/model` format (e.g. "anthropic/claude-opus-4-6"),
 /// or bare model names when `OPENAI_BASE_URL` is set to any non-empty value
 /// (for local and custom OpenAI-compatible providers like Ollama, LM Studio,
